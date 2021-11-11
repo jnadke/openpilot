@@ -50,6 +50,7 @@ class Planner():
     self.fcw = False
 
     self.cachedParams = CachedParams()
+    self.v_slow_last = None
 
     self.v_desired = init_v
     self.a_desired = init_a
@@ -108,13 +109,24 @@ class Planner():
     self.a_desired = float(interp(DT_MDL, T_IDXS[:CONTROL_N], self.a_desired_trajectory))
     self.v_desired = self.v_desired + DT_MDL * (self.a_desired + a_prev)/2.0
 
+    slow_v = None
     if lateral_planner.lateralPlan and self.cachedParams.get('jvePilot.settings.slowInCurves', 5000) == "1":
       curvs = list(lateral_planner.lateralPlan.curvatures)
       if len(curvs):
         # find the largest curvature in the solution and use that.
         curv = abs(curvs[-1])
         if curv != 0:
-          self.v_desired = float(min(self.v_desired, self.limit_speed_in_curv(sm, curv)))
+          slow_v = float(min(self.v_desired, self.limit_speed_in_curv(sm, curv)))
+
+    if slow_v is not None:
+      if self.v_slow_last is None:
+        self.v_slow_last = slow_v
+      else:
+        slow_v, self.v_slow_last = self.accel_hysteresis(slow_v, self.v_slow_last)
+
+      self.v_desired = slow_v
+    else:
+      self.v_slow_last = None
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
@@ -147,3 +159,14 @@ class Planner():
     v_curvature = np.sqrt(a_y_max / np.clip(curv, 1e-4, None))
     model_speed = np.min(v_curvature)
     return model_speed * self.cachedParams.get_float('jvePilot.settings.slowInCurves.speedRatio', 5000)
+
+  def accel_hysteresis(self, accel, accel_steady):
+    ACCEL_HYST_GAP = 1.3
+    # for small accel oscillations within ACCEL_HYST_GAP, don't change the accel command
+    if accel > accel_steady + ACCEL_HYST_GAP:
+      accel_steady = accel - ACCEL_HYST_GAP
+    elif accel < accel_steady - ACCEL_HYST_GAP:
+      accel_steady = accel + ACCEL_HYST_GAP
+    accel = accel_steady
+
+    return accel, accel_steady
